@@ -1,0 +1,185 @@
+name: Auto Priority by Label
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  update_project_priority:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Priority in Project
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          PROJECT_NUMBER: "5"
+          USER_OR_ORG: "em000612"
+          PRIORITY_FIELD_NAME: "Priority"
+          ITERATION_FIELD_NAME: "Iteration"
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          LABEL_NAME: ${{ github.event.label.name }}
+        run: |
+          set -euo pipefail
+
+          LABEL_LOWER=$(printf '%s' "$LABEL_NAME" | tr '[:upper:]' '[:lower:]')
+          PRIORITY=""
+          ITERATION_TITLE=""
+
+          case "$LABEL_LOWER" in
+            bug)
+              PRIORITY="P0"
+              ;;
+            question)
+              PRIORITY="P1"
+              ;;
+            enhancement)
+              PRIORITY="P3"
+              ;;
+          esac
+
+          case "$LABEL_LOWER" in
+            iteration-1|sprint-1|it-1)
+              ITERATION_TITLE="Iteration 1"
+              ;;
+            iteration-2|sprint-2|it-2)
+              ITERATION_TITLE="Iteration 2"
+              ;;
+            iteration-3|sprint-3|it-3)
+              ITERATION_TITLE="Iteration 3"
+              ;;
+            iteration-4|sprint-4|it-4)
+              ITERATION_TITLE="Iteration 4"
+              ;;
+          esac
+
+          if [[ -z "$PRIORITY" && -z "$ITERATION_TITLE" ]]; then
+            echo "Skip: label '$LABEL_LOWER' is not mapped"
+            exit 0
+          fi
+
+          GRAPHQL_QUERY=$(cat <<'EOF'
+query($owner: String!, $number: Int!) {
+  organization(login: $owner) {
+    projectV2(number: $number) {
+      ...projectData
+    }
+  }
+  user(login: $owner) {
+    projectV2(number: $number) {
+      ...projectData
+    }
+  }
+}
+
+fragment projectData on ProjectV2 {
+  id
+  fields(first: 100) {
+    nodes {
+      __typename
+      ... on ProjectV2SingleSelectField {
+        id
+        name
+        options {
+          id
+          name
+        }
+      }
+      ... on ProjectV2IterationField {
+        id
+        name
+        configuration {
+          iterations {
+            id
+            title
+          }
+        }
+      }
+    }
+  }
+  items(first: 100) {
+    nodes {
+      id
+      content {
+        __typename
+        ... on Issue {
+          number
+        }
+      }
+    }
+  }
+}
+EOF
+)
+
+          PROJECT_RESPONSE=$(gh api graphql -f query="$GRAPHQL_QUERY" -F owner="$USER_OR_ORG" -F number="$PROJECT_NUMBER")
+          PROJECT_JSON=$(jq -c '.data.organization.projectV2 // .data.user.projectV2' <<<"$PROJECT_RESPONSE")
+
+          if [[ -z "$PROJECT_JSON" || "$PROJECT_JSON" == "null" ]]; then
+            echo "Project $PROJECT_NUMBER for owner '$USER_OR_ORG' was not found"
+            exit 1
+          fi
+
+          PROJECT_ID=$(jq -r '.id' <<<"$PROJECT_JSON")
+
+          ITEM_ID=$(jq -r --arg issue_number "$ISSUE_NUMBER" '
+            .items.nodes[]
+            | select(.content.number == ($issue_number | tonumber))
+            | .id
+          ' <<<"$PROJECT_JSON" | head -n 1)
+
+          if [[ -z "$ITEM_ID" || "$ITEM_ID" == "null" ]]; then
+            ADD_RESPONSE=$(gh api graphql -f query='mutation($projectId: ID!, $contentId: ID!) { addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) { item { id } } }' -F projectId="$PROJECT_ID" -F contentId="$ISSUE_NODE_ID")
+            ITEM_ID=$(jq -r '.data.addProjectV2ItemById.item.id' <<<"$ADD_RESPONSE")
+          fi
+
+          if [[ -n "$PRIORITY" ]]; then
+            PRIORITY_FIELD_ID=$(jq -r --arg field "$PRIORITY_FIELD_NAME" '
+              .fields.nodes[]
+              | select(.name == $field and .__typename == "ProjectV2SingleSelectField")
+              | .id
+            ' <<<"$PROJECT_JSON" | head -n 1)
+
+            PRIORITY_OPTION_ID=$(jq -r --arg field "$PRIORITY_FIELD_NAME" --arg option "$PRIORITY" '
+              .fields.nodes[]
+              | select(.name == $field and .__typename == "ProjectV2SingleSelectField")
+              | .options[]
+              | select(.name == $option)
+              | .id
+            ' <<<"$PROJECT_JSON" | head -n 1)
+
+            if [[ -n "$PRIORITY_FIELD_ID" && -n "$PRIORITY_OPTION_ID" ]]; then
+              gh api graphql -f query='mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: ID!) { updateProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: { singleSelectOptionId: $optionId } }) { projectV2Item { id } } }' -F projectId="$PROJECT_ID" -F itemId="$ITEM_ID" -F fieldId="$PRIORITY_FIELD_ID" -F optionId="$PRIORITY_OPTION_ID" >/dev/null
+              echo "Done: priority $PRIORITY"
+            else
+              echo "Skip priority: field or option not found"
+            fi
+          fi
+
+          if [[ -n "$ITERATION_TITLE" ]]; then
+            ITERATION_FIELD_ID=$(jq -r --arg field "$ITERATION_FIELD_NAME" '
+              .fields.nodes[]
+              | select(.name == $field and .__typename == "ProjectV2IterationField")
+              | .id
+            ' <<<"$PROJECT_JSON" | head -n 1)
+
+            ITERATION_ID=$(jq -r --arg field "$ITERATION_FIELD_NAME" --arg title "$ITERATION_TITLE" '
+              .fields.nodes[]
+              | select(.name == $field and .__typename == "ProjectV2IterationField")
+              | .configuration.iterations[]
+              | select(.title == $title)
+              | .id
+            ' <<<"$PROJECT_JSON" | head -n 1)
+
+            if [[ -n "$ITERATION_FIELD_ID" && -n "$ITERATION_ID" ]]; then
+              gh api graphql -f query='mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $iterationId: ID!) { updateProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: { iterationId: $iterationId } }) { projectV2Item { id } } }' -F projectId="$PROJECT_ID" -F itemId="$ITEM_ID" -F fieldId="$ITERATION_FIELD_ID" -F iterationId="$ITERATION_ID" >/dev/null
+              echo "Done: iteration $ITERATION_TITLE"
+            else
+              echo "Skip iteration: field or value not found"
+            fi
+          fi
