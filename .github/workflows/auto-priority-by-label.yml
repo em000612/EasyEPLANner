@@ -63,59 +63,7 @@ jobs:
             exit 0
           fi
 
-          GRAPHQL_QUERY=$(cat <<'EOF'
-query($owner: String!, $number: Int!) {
-  organization(login: $owner) {
-    projectV2(number: $number) {
-      ...projectData
-    }
-  }
-  user(login: $owner) {
-    projectV2(number: $number) {
-      ...projectData
-    }
-  }
-}
-
-fragment projectData on ProjectV2 {
-  id
-  fields(first: 100) {
-    nodes {
-      __typename
-      ... on ProjectV2SingleSelectField {
-        id
-        name
-        options {
-          id
-          name
-        }
-      }
-      ... on ProjectV2IterationField {
-        id
-        name
-        configuration {
-          iterations {
-            id
-            title
-          }
-        }
-      }
-    }
-  }
-  items(first: 100) {
-    nodes {
-      id
-      content {
-        __typename
-        ... on Issue {
-          number
-        }
-      }
-    }
-  }
-}
-EOF
-)
+          GRAPHQL_QUERY=$'query($owner: String!, $number: Int!) {\n  organization(login: $owner) {\n    projectV2(number: $number) {\n      ...projectData\n    }\n  }\n  user(login: $owner) {\n    projectV2(number: $number) {\n      ...projectData\n    }\n  }\n}\n\nfragment projectData on ProjectV2 {\n  id\n  fields(first: 100) {\n    nodes {\n      __typename\n      ... on ProjectV2SingleSelectField {\n        id\n        name\n        options {\n          id\n          name\n        }\n      }\n      ... on ProjectV2IterationField {\n        id\n        name\n        configuration {\n          iterations {\n            id\n            title\n          }\n        }\n      }\n    }\n  }\n  items(first: 100) {\n    nodes {\n      id\n      content {\n        __typename\n        ... on Issue {\n          number\n        }\n      }\n    }\n  }\n}'
 
           PROJECT_RESPONSE=$(gh api graphql -f query="$GRAPHQL_QUERY" -F owner="$USER_OR_ORG" -F number="$PROJECT_NUMBER")
           PROJECT_JSON=$(jq -c '.data.organization.projectV2 // .data.user.projectV2' <<<"$PROJECT_RESPONSE")
